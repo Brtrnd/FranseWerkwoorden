@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conjugaison</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>Conjugaison des verbes français</h1>
+
+<!-- Selection screen: pick verbs and tenses -->
+<div id="keuzeScherm" class="scherm actief">
+  <fieldset>
+    <legend>Verbes</legend>
+    <div class="werkwoord-kiezer">
+      <input type="text" id="werkwoordInvoer" list="werkwoordOpties" placeholder="Tape pour chercher un verbe...">
+      <datalist id="werkwoordOpties"></datalist>
+      <button type="button" id="werkwoordToevoegenKnop">Ajouter</button>
+    </div>
+    <div id="werkwoordInvoerFout" class="feedback fout"></div>
+    <div id="geselecteerdeWerkwoordenVeld" class="chip-lijst"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Temps / modes</legend>
+    <div id="tijdLijst" class="checkbox-lijst"></div>
+  </fieldset>
+
+  <button id="startKnop">Commencer</button>
+  <div id="keuzeFout" class="feedback fout"></div>
+</div>
+
+<!-- Quiz screen -->
+<div id="quizScherm" class="scherm">
+  <div class="score-balk">
+    <span id="scoreWeergave"></span>
+    <button class="secundair" id="terugKnop">← Verbes</button>
+  </div>
+
+  <div class="vraag-kaart">
+    <div class="vraag-werkwoord" id="vraagWerkwoord"></div>
+    <div class="vraag-vertaling" id="vraagVertaling"></div>
+    <div class="vraag-detail">
+      <span class="persoon" id="vraagPersoon"></span> —
+      <span id="vraagTijd"></span>
+    </div>
+    <input type="text" id="antwoordVeld" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="accent-balk" id="accentBalk"></div>
+    <div class="feedback" id="feedback"></div>
+  </div>
+
+  <button id="controleerKnop">Vérifier</button>
+  <button id="overslaanKnop" class="secundair">skip</button>
+  <button id="volgendeKnop" style="display:none;">Suivant →</button>
+
+  <fieldset class="geschiedenis-kader">
+    <legend>Historique (60 derniers)</legend>
+    <div id="geschiedenisLijst" class="geschiedenis-lijst"></div>
+  </fieldset>
+</div>
+
+<script src="verbs.js"></script>
+<script src="translations-nl.js"></script>
+<script>
+// ---- App state ----
+// Set of infinitives currently picked in the verb dropdown (persists while on the selection screen).
+let geselecteerdeWerkwoordenSet = new Set();
+let geselecteerdeTijden = [];
+let huidigeVraag = null;       // { werkwoord, tijd, persoonIndex }
+let score = { opgelost: 0, fouteAntwoorden: 0 };
+// In-memory only: last 30 answers this session. Cleared on reload or when leaving the quiz.
+let geschiedenis = [];
+
+// Accented letters offered near the answer field.
+const ACCENT_TEKENS = ["é", "è", "ê", "à", "â", "ç", "î", "ï", "ô", "û", "ù"];
+
+// Dutch label if known, else fall back to the French infinitive.
+function werkwoordLabel(infinitief) {
+  return VERTALINGEN[infinitief] || infinitief;
+}
+
+// ---- Persist verb selection only (not tenses, not history) in localStorage + the URL ----
+const OPSLAG_SLEUTEL = "conjugaison-werkwoorden";
+
+function slaWerkwoordSelectieOp() {
+  const lijst = [...geselecteerdeWerkwoordenSet];
+  localStorage.setItem(OPSLAG_SLEUTEL, JSON.stringify(lijst));
+
+  const url = new URL(window.location.href);
+  if (lijst.length > 0) {
+    url.searchParams.set("verbs", lijst.join(","));
+  } else {
+    url.searchParams.delete("verbs");
+  }
+  history.replaceState(null, "", url);
+}
+
+// URL takes priority over localStorage, so opening a shared link overrides what's saved locally.
+function laadWerkwoordSelectie() {
+  const url = new URL(window.location.href);
+  const uitUrl = url.searchParams.get("verbs");
+  if (uitUrl) {
+    uitUrl.split(",").map(v => v.trim()).filter(v => WERKWOORDEN[v]).forEach(v => geselecteerdeWerkwoordenSet.add(v));
+    return;
+  }
+  const opgeslagen = localStorage.getItem(OPSLAG_SLEUTEL);
+  if (opgeslagen) {
+    try {
+      JSON.parse(opgeslagen).filter(v => WERKWOORDEN[v]).forEach(v => geselecteerdeWerkwoordenSet.add(v));
+    } catch (e) {
+      // Corrupt/old localStorage data: ignore and start empty.
+    }
+  }
+}
+
+// ---- Build selection screen from data files ----
+function vulKeuzeSchermIn() {
+  // Datalist options for the verb search box, sorted alphabetically by displayed label.
+  const opties = document.getElementById("werkwoordOpties");
+  const infinitieven = Object.keys(WERKWOORDEN).sort((a, b) => werkwoordLabel(a).localeCompare(werkwoordLabel(b), "fr"));
+  infinitieven.forEach(inf => {
+    const optie = document.createElement("option");
+    const label = werkwoordLabel(inf);
+    // Value carries both parts so we can parse the infinitive back out on "Ajouter".
+    optie.value = label === inf ? inf : `${inf} — ${label}`;
+    opties.appendChild(optie);
+  });
+
+  const tijdLijst = document.getElementById("tijdLijst");
+  TIJDEN.forEach(t => {
+    const label = document.createElement("label");
+    label.innerHTML = `<input type="checkbox" value="${t.id}" class="tijdCheckbox"> ${t.label}`;
+    tijdLijst.appendChild(label);
+  });
+
+  const accentBalk = document.getElementById("accentBalk");
+  ACCENT_TEKENS.forEach(teken => {
+    const knop = document.createElement("button");
+    knop.type = "button";
+    knop.className = "accent-knop";
+    knop.textContent = teken;
+    knop.addEventListener("click", () => voegAccentIn(teken));
+    accentBalk.appendChild(knop);
+  });
+}
+
+// Inserts an accented character at the current cursor position in the answer field.
+function voegAccentIn(teken) {
+  const veld = document.getElementById("antwoordVeld");
+  const start = veld.selectionStart;
+  const eind = veld.selectionEnd;
+  veld.value = veld.value.slice(0, start) + teken + veld.value.slice(eind);
+  veld.focus();
+  veld.selectionStart = veld.selectionEnd = start + teken.length;
+}
+
+// Extracts the infinitive from a datalist entry ("infinitif — label" or just "infinitif").
+function parseInvoer(tekst) {
+  const deel = tekst.split("—")[0].trim();
+  return deel;
+}
+
+function toonGeselecteerdeWerkwoorden() {
+  const veld = document.getElementById("geselecteerdeWerkwoordenVeld");
+  veld.innerHTML = "";
+  if (geselecteerdeWerkwoordenSet.size === 0) {
+    veld.innerHTML = `<span class="chip-leeg">Aucun verbe sélectionné pour l'instant.</span>`;
+    return;
+  }
+  [...geselecteerdeWerkwoordenSet].sort((a, b) => werkwoordLabel(a).localeCompare(werkwoordLabel(b), "fr")).forEach(inf => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.innerHTML = `${werkwoordLabel(inf)} <button type="button" class="chip-verwijder" data-werkwoord="${inf}" title="Retirer">×</button>`;
+    veld.appendChild(chip);
+  });
+}
+
+function voegWerkwoordToe() {
+  const invoer = document.getElementById("werkwoordInvoer");
+  const foutVeld = document.getElementById("werkwoordInvoerFout");
+  const infinitief = parseInvoer(invoer.value);
+
+  if (!infinitief) { foutVeld.textContent = ""; return; }
+  if (!WERKWOORDEN[infinitief]) {
+    foutVeld.textContent = `Verbe inconnu : "${infinitief}".`;
+    return;
+  }
+  foutVeld.textContent = "";
+  geselecteerdeWerkwoordenSet.add(infinitief);
+  invoer.value = "";
+  invoer.focus();
+  toonGeselecteerdeWerkwoorden();
+  slaWerkwoordSelectieOp();
+}
+
+document.getElementById("werkwoordToevoegenKnop").addEventListener("click", voegWerkwoordToe);
+document.getElementById("werkwoordInvoer").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); voegWerkwoordToe(); }
+});
+document.getElementById("geselecteerdeWerkwoordenVeld").addEventListener("click", e => {
+  if (!e.target.classList.contains("chip-verwijder")) return;
+  geselecteerdeWerkwoordenSet.delete(e.target.dataset.werkwoord);
+  toonGeselecteerdeWerkwoorden();
+  slaWerkwoordSelectieOp();
+});
+
+function wisselScherm(naarId) {
+  document.querySelectorAll(".scherm").forEach(el => el.classList.remove("actief"));
+  document.getElementById(naarId).classList.add("actief");
+}
+
+// ---- Start quiz: read checkboxes, validate, generate first question ----
+document.getElementById("startKnop").addEventListener("click", () => {
+  geselecteerdeTijden = Array.from(document.querySelectorAll(".tijdCheckbox:checked")).map(cb => cb.value);
+
+  const foutVeld = document.getElementById("keuzeFout");
+  if (geselecteerdeWerkwoordenSet.size === 0 || geselecteerdeTijden.length === 0) {
+    foutVeld.textContent = "Choisis au moins un verbe et un temps.";
+    return;
+  }
+  foutVeld.textContent = "";
+
+  score = { opgelost: 0, fouteAntwoorden: 0 };
+  geschiedenis = [];
+  toonGeschiedenis();
+  wisselScherm("quizScherm");
+  nieuweVraag();
+});
+
+document.getElementById("terugKnop").addEventListener("click", () => {
+  // History is session-only: leaving the quiz clears it.
+  geschiedenis = [];
+  wisselScherm("keuzeScherm");
+});
+
+// ---- Pick a random {verb, tense, person} from the selected pools ----
+function nieuweVraag() {
+  const werkwoordenArray = [...geselecteerdeWerkwoordenSet];
+  const werkwoord = werkwoordenArray[Math.floor(Math.random() * werkwoordenArray.length)];
+  const tijd = geselecteerdeTijden[Math.floor(Math.random() * geselecteerdeTijden.length)];
+  const persoonIndex = Math.floor(Math.random() * VOORNAAMWOORDEN.length);
+  huidigeVraag = { werkwoord, tijd, persoonIndex };
+
+  const tijdLabel = TIJDEN.find(t => t.id === tijd).label;
+  document.getElementById("vraagWerkwoord").textContent = werkwoord;
+  document.getElementById("vraagVertaling").textContent = VERTALINGEN[werkwoord] || "";
+  // Note: quiz always shows the French infinitive itself (unambiguous target of the question);
+  // the Dutch/fallback label is only used in the picker and the chip list.
+  document.getElementById("vraagPersoon").textContent = VOORNAAMWOORDEN[persoonIndex];
+  document.getElementById("vraagTijd").textContent = tijdLabel;
+
+  const veld = document.getElementById("antwoordVeld");
+  veld.value = "";
+  veld.classList.remove("fout", "goed");
+  veld.disabled = false;
+  veld.focus();
+
+  document.getElementById("feedback").textContent = "";
+  document.getElementById("feedback").className = "feedback";
+  document.getElementById("controleerKnop").style.display = "inline-block";
+  document.getElementById("overslaanKnop").style.display = "inline-block";
+  document.getElementById("volgendeKnop").style.display = "none";
+
+  bijwerkenScoreWeergave();
+}
+
+// Strict but forgiving on case/whitespace: trim, collapse spaces, lowercase.
+// Accents are NOT stripped — spelling must still be correct.
+function normaliseerAntwoord(tekst) {
+  return tekst.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function controleerAntwoord() {
+  const veld = document.getElementById("antwoordVeld");
+  const juisteAntwoord = WERKWOORDEN[huidigeVraag.werkwoord][huidigeVraag.tijd][huidigeVraag.persoonIndex];
+  const isJuist = normaliseerAntwoord(veld.value) === normaliseerAntwoord(juisteAntwoord);
+
+  const feedback = document.getElementById("feedback");
+
+  if (isJuist) {
+    score.opgelost++;
+    veld.classList.remove("fout");
+    veld.classList.add("goed");
+    veld.disabled = true;
+    feedback.textContent = "Correct !";
+    feedback.className = "feedback goed";
+    document.getElementById("controleerKnop").style.display = "none";
+    document.getElementById("overslaanKnop").style.display = "none";
+    document.getElementById("volgendeKnop").style.display = "inline-block";
+  } else {
+    score.fouteAntwoorden++;
+    veld.classList.add("fout");
+    feedback.textContent = "Pas encore correct, réessaie.";
+    feedback.className = "feedback fout";
+  }
+  voegGeschiedenisToe({
+    werkwoord: huidigeVraag.werkwoord,
+    tijd: huidigeVraag.tijd,
+    persoonIndex: huidigeVraag.persoonIndex,
+    antwoord: veld.value,
+    status: isJuist ? "goed" : "fout"
+  });
+  bijwerkenScoreWeergave();
+}
+
+document.getElementById("overslaanKnop").addEventListener("click", () => {
+  voegGeschiedenisToe({
+    werkwoord: huidigeVraag.werkwoord,
+    tijd: huidigeVraag.tijd,
+    persoonIndex: huidigeVraag.persoonIndex,
+    antwoord: WERKWOORDEN[huidigeVraag.werkwoord][huidigeVraag.tijd][huidigeVraag.persoonIndex],
+    status: "overgeslagen"
+  });
+  nieuweVraag();
+});
+
+// Fixed-length (60), in-memory session log. Newest entry on top.
+function voegGeschiedenisToe(item) {
+  geschiedenis.unshift(item);
+  if (geschiedenis.length > 60) geschiedenis.pop();
+  toonGeschiedenis();
+}
+
+function toonGeschiedenis() {
+  const lijst = document.getElementById("geschiedenisLijst");
+  lijst.innerHTML = "";
+  if (geschiedenis.length === 0) {
+    lijst.innerHTML = `<span class="chip-leeg">Pas encore de réponses.</span>`;
+    return;
+  }
+  geschiedenis.forEach(item => {
+    const tijdLabel = TIJDEN.find(t => t.id === item.tijd).label;
+    const regel = document.createElement("div");
+    regel.className = `geschiedenis-regel geschiedenis-${item.status}`;
+    const antwoordTekst = item.antwoord || "—";
+    regel.textContent = `${item.werkwoord} (${VOORNAAMWOORDEN[item.persoonIndex]}, ${tijdLabel}) — ${antwoordTekst}`;
+    lijst.appendChild(regel);
+  });
+}
+
+function bijwerkenScoreWeergave() {
+  document.getElementById("scoreWeergave").textContent =
+    `Résolus: ${score.opgelost} · Erreurs: ${score.fouteAntwoorden}`;
+}
+
+document.getElementById("controleerKnop").addEventListener("click", controleerAntwoord);
+document.getElementById("volgendeKnop").addEventListener("click", nieuweVraag);
+
+// Enter key submits (or moves to next question if already correct)
+document.getElementById("antwoordVeld").addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  const volgendeZichtbaar = document.getElementById("volgendeKnop").style.display !== "none";
+  volgendeZichtbaar ? nieuweVraag() : controleerAntwoord();
+});
+
+laadWerkwoordSelectie();
+vulKeuzeSchermIn();
+toonGeselecteerdeWerkwoorden();
+toonGeschiedenis();
+</script>
+</body>
+</html>
