@@ -41,22 +41,28 @@
 
   <div class="vraag-kaart">
     <div class="vraag-werkwoord" id="vraagWerkwoord"></div>
-    <div class="vraag-vertaling" id="vraagVertaling"></div>
     <div class="vraag-detail">
       <span class="persoon" id="vraagPersoon"></span> —
       <span id="vraagTijd"></span>
     </div>
     <input type="text" id="antwoordVeld" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="hulp-weergave" id="hulpWeergave"></div>
     <div class="accent-balk" id="accentBalk"></div>
     <div class="feedback" id="feedback"></div>
   </div>
 
-  <button id="controleerKnop">Vérifier</button>
-  <button id="overslaanKnop" class="secundair">skip</button>
+  <button id="controleerKnop" disabled>Vérifier</button>
+  <button id="hulpKnop" class="secundair">Aide</button>
+  <button id="overslaanKnop" class="secundair">Passer</button>
   <button id="volgendeKnop" style="display:none;">Suivant →</button>
 
+  <div class="volledige-hulp" id="volledigeHulp">
+    <button type="button" class="secundair" id="volledigeHulpKnop">Voir toute la conjugaison</button>
+    <div class="conjugatie-tabel" id="conjugatieTabel"></div>
+  </div>
+
   <fieldset class="geschiedenis-kader">
-    <legend>Historique (60 derniers)</legend>
+    <legend>Historique (30 derniers)</legend>
     <div id="geschiedenisLijst" class="geschiedenis-lijst"></div>
   </fieldset>
 </div>
@@ -72,9 +78,12 @@ let huidigeVraag = null;       // { werkwoord, tijd, persoonIndex }
 let score = { opgelost: 0, fouteAntwoorden: 0 };
 // In-memory only: last 30 answers this session. Cleared on reload or when leaving the quiz.
 let geschiedenis = [];
+// Whether "Aide" was used for the current question (keeps the hint live as the user keeps typing).
+let hulpActief = false;
 
 // Accented letters offered near the answer field.
 const ACCENT_TEKENS = ["é", "è", "ê", "à", "â", "ç", "î", "ï", "ô", "û", "ù"];
+
 // Futur proche is periphrastic (aller au présent + infinitif) — not stored per verb, computed here.
 const FUTUR_PROCHE_HULPWERKWOORD = ["vais", "vas", "va", "allons", "allez", "vont"];
 
@@ -89,8 +98,8 @@ function kiesPersoonIndex(tijd) {
   return opties[Math.floor(Math.random() * opties.length)];
 }
 
-// Central lookup: handles the computed futur proche and gaps in the data
-// (e.g. no imperative for "pouvoir") by returning null instead of crashing.
+// Central lookup for "what is the correct answer here", including the computed
+// futur proche and gaps in the data (e.g. no imperative for "pouvoir") -> null.
 function juisteAntwoordVoor(werkwoord, tijd, persoonIndex) {
   if (tijd === "futur-proche") {
     return `${FUTUR_PROCHE_HULPWERKWOORD[persoonIndex]} ${werkwoord}`;
@@ -98,8 +107,15 @@ function juisteAntwoordVoor(werkwoord, tijd, persoonIndex) {
   const rij = WERKWOORDEN[werkwoord][tijd];
   return rij ? rij[persoonIndex] : null;
 }
-// Dutch label if known, else fall back to the French infinitive.
-function werkwoordLabel(infinitief) {
+
+// Selection screen shows both languages when known ("manger — eten"); French alone if not translated.
+function selectieLabel(infinitief) {
+  const nl = VERTALINGEN[infinitief];
+  return nl ? `${infinitief} — ${nl}` : infinitief;
+}
+
+// Quiz screen shows Dutch only if known, otherwise falls back to French.
+function quizLabel(infinitief) {
   return VERTALINGEN[infinitief] || infinitief;
 }
 
@@ -141,12 +157,10 @@ function laadWerkwoordSelectie() {
 function vulKeuzeSchermIn() {
   // Datalist options for the verb search box, sorted alphabetically by displayed label.
   const opties = document.getElementById("werkwoordOpties");
-  const infinitieven = Object.keys(WERKWOORDEN).sort((a, b) => werkwoordLabel(a).localeCompare(werkwoordLabel(b), "fr"));
+  const infinitieven = Object.keys(WERKWOORDEN).sort((a, b) => selectieLabel(a).localeCompare(selectieLabel(b), "fr"));
   infinitieven.forEach(inf => {
     const optie = document.createElement("option");
-    const label = werkwoordLabel(inf);
-    // Value carries both parts so we can parse the infinitive back out on "Ajouter".
-    optie.value = label === inf ? inf : `${inf} — ${label}`;
+    optie.value = selectieLabel(inf);
     opties.appendChild(optie);
   });
 
@@ -191,10 +205,10 @@ function toonGeselecteerdeWerkwoorden() {
     veld.innerHTML = `<span class="chip-leeg">Aucun verbe sélectionné pour l'instant.</span>`;
     return;
   }
-  [...geselecteerdeWerkwoordenSet].sort((a, b) => werkwoordLabel(a).localeCompare(werkwoordLabel(b), "fr")).forEach(inf => {
+  [...geselecteerdeWerkwoordenSet].sort((a, b) => selectieLabel(a).localeCompare(selectieLabel(b), "fr")).forEach(inf => {
     const chip = document.createElement("span");
     chip.className = "chip";
-    chip.innerHTML = `${werkwoordLabel(inf)} <button type="button" class="chip-verwijder" data-werkwoord="${inf}" title="Retirer">×</button>`;
+    chip.innerHTML = `${selectieLabel(inf)} <button type="button" class="chip-verwijder" data-werkwoord="${inf}" title="Retirer">×</button>`;
     veld.appendChild(chip);
   });
 }
@@ -258,18 +272,22 @@ document.getElementById("terugKnop").addEventListener("click", () => {
 });
 
 // ---- Pick a random {verb, tense, person} from the selected pools ----
+// Retries if the combo has no valid answer (e.g. no imperative for "pouvoir").
 function nieuweVraag() {
   const werkwoordenArray = [...geselecteerdeWerkwoordenSet];
-  const werkwoord = werkwoordenArray[Math.floor(Math.random() * werkwoordenArray.length)];
-  const tijd = geselecteerdeTijden[Math.floor(Math.random() * geselecteerdeTijden.length)];
-  const persoonIndex = kiesPersoonIndex(tijd);
+  let werkwoord, tijd, persoonIndex, antwoord;
+  let pogingen = 0;
+  do {
+    werkwoord = werkwoordenArray[Math.floor(Math.random() * werkwoordenArray.length)];
+    tijd = geselecteerdeTijden[Math.floor(Math.random() * geselecteerdeTijden.length)];
+    persoonIndex = kiesPersoonIndex(tijd);
+    antwoord = juisteAntwoordVoor(werkwoord, tijd, persoonIndex);
+    pogingen++;
+  } while (antwoord === null && pogingen < 50);
   huidigeVraag = { werkwoord, tijd, persoonIndex };
 
   const tijdLabel = TIJDEN.find(t => t.id === tijd).label;
-  document.getElementById("vraagWerkwoord").textContent = werkwoord;
-  document.getElementById("vraagVertaling").textContent = VERTALINGEN[werkwoord] || "";
-  // Note: quiz always shows the French infinitive itself (unambiguous target of the question);
-  // the Dutch/fallback label is only used in the picker and the chip list.
+  document.getElementById("vraagWerkwoord").textContent = quizLabel(werkwoord);
   document.getElementById("vraagPersoon").textContent = VOORNAAMWOORDEN[persoonIndex];
   document.getElementById("vraagTijd").textContent = tijdLabel;
 
@@ -279,9 +297,16 @@ function nieuweVraag() {
   veld.disabled = false;
   veld.focus();
 
+  hulpActief = false;
+  document.getElementById("hulpWeergave").innerHTML = "";
+  document.getElementById("volledigeHulp").classList.remove("actief");
+  bouwConjugatieTabel(werkwoord);
+
   document.getElementById("feedback").textContent = "";
   document.getElementById("feedback").className = "feedback";
   document.getElementById("controleerKnop").style.display = "inline-block";
+  document.getElementById("controleerKnop").disabled = true;
+  document.getElementById("hulpKnop").style.display = "inline-block";
   document.getElementById("overslaanKnop").style.display = "inline-block";
   document.getElementById("volgendeKnop").style.display = "none";
 
@@ -294,10 +319,74 @@ function normaliseerAntwoord(tekst) {
   return tekst.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-function controleerAntwoord() {
+// Accepts the answer with or without the subject pronoun prefixed ("mange" and "il mange"
+// both count), using the correct elided form ("j'") for je before a vowel/h/y sound.
+function pronomenVarianten(persoonIndex, antwoord) {
+  const pronoun = VOORNAAMWOORDEN[persoonIndex];
+  if (pronoun === "je") {
+    const beginKlinkerOfH = /^[aeiouhyàâäéèêëîïôöùûü]/i.test(antwoord);
+    return [beginKlinkerOfH ? `j'${antwoord}` : `je ${antwoord}`];
+  }
+  return [`${pronoun} ${antwoord}`];
+}
+
+function isAntwoordJuist(getypt, juisteAntwoord, persoonIndex) {
+  const varianten = [juisteAntwoord, ...pronomenVarianten(persoonIndex, juisteAntwoord)];
+  const genormaliseerd = normaliseerAntwoord(getypt);
+  return varianten.some(v => normaliseerAntwoord(v) === genormaliseerd);
+}
+
+// "Aide": colors each typed letter green if it's correct for that position, red otherwise.
+// Doesn't reveal letters the user hasn't typed yet.
+function toonHulp() {
+  hulpActief = true;
   const veld = document.getElementById("antwoordVeld");
   const juisteAntwoord = juisteAntwoordVoor(huidigeVraag.werkwoord, huidigeVraag.tijd, huidigeVraag.persoonIndex);
-  const isJuist = normaliseerAntwoord(veld.value) === normaliseerAntwoord(juisteAntwoord);
+  const getypt = veld.value;
+
+  const weergave = document.getElementById("hulpWeergave");
+  weergave.innerHTML = "";
+  [...getypt].forEach((letter, i) => {
+    const span = document.createElement("span");
+    const correct = juisteAntwoord[i] && letter.toLowerCase() === juisteAntwoord[i].toLowerCase();
+    span.className = correct ? "hulp-goed" : "hulp-fout";
+    span.textContent = letter;
+    weergave.appendChild(span);
+  });
+}
+
+document.getElementById("hulpKnop").addEventListener("click", toonHulp);
+// Keep the hint in sync while typing, once it's been requested for this question.
+document.getElementById("antwoordVeld").addEventListener("input", () => {
+  if (hulpActief) toonHulp();
+  document.getElementById("controleerKnop").disabled = document.getElementById("antwoordVeld").value.trim() === "";
+});
+
+// Uses juisteAntwoordVoor() itself, so futur proche and imperative gaps ("—") render correctly here too.
+function bouwConjugatieTabel(werkwoord) {
+  let html = `<table><thead><tr><th></th>${VOORNAAMWOORDEN.map(p => `<th>${p}</th>`).join("")}</tr></thead><tbody>`;
+  TIJDEN.forEach(t => {
+    html += `<tr><th>${t.label}</th>`;
+    for (let i = 0; i < VOORNAAMWOORDEN.length; i++) {
+      const vorm = juisteAntwoordVoor(werkwoord, t.id, i);
+      html += `<td>${vorm || "—"}</td>`;
+    }
+    html += "</tr>";
+  });
+  html += "</tbody></table>";
+  document.getElementById("conjugatieTabel").innerHTML = html;
+}
+
+document.getElementById("volledigeHulpKnop").addEventListener("click", () => {
+  document.getElementById("volledigeHulp").classList.toggle("actief");
+});
+
+function controleerAntwoord() {
+  const veld = document.getElementById("antwoordVeld");
+  if (veld.value.trim() === "") return; // guard: nothing to check
+
+  const juisteAntwoord = juisteAntwoordVoor(huidigeVraag.werkwoord, huidigeVraag.tijd, huidigeVraag.persoonIndex);
+  const isJuist = isAntwoordJuist(veld.value, juisteAntwoord, huidigeVraag.persoonIndex);
 
   const feedback = document.getElementById("feedback");
 
@@ -309,6 +398,7 @@ function controleerAntwoord() {
     feedback.textContent = "Correct !";
     feedback.className = "feedback goed";
     document.getElementById("controleerKnop").style.display = "none";
+    document.getElementById("hulpKnop").style.display = "none";
     document.getElementById("overslaanKnop").style.display = "none";
     document.getElementById("volgendeKnop").style.display = "inline-block";
   } else {
@@ -332,16 +422,16 @@ document.getElementById("overslaanKnop").addEventListener("click", () => {
     werkwoord: huidigeVraag.werkwoord,
     tijd: huidigeVraag.tijd,
     persoonIndex: huidigeVraag.persoonIndex,
-    antwoord: WERKWOORDEN[huidigeVraag.werkwoord][huidigeVraag.tijd][huidigeVraag.persoonIndex],
+    antwoord: null,
     status: "overgeslagen"
   });
   nieuweVraag();
 });
 
-// Fixed-length (60), in-memory session log. Newest entry on top.
+// Fixed-length (30), in-memory session log. Newest entry on top.
 function voegGeschiedenisToe(item) {
   geschiedenis.unshift(item);
-  if (geschiedenis.length > 60) geschiedenis.pop();
+  if (geschiedenis.length > 30) geschiedenis.pop();
   toonGeschiedenis();
 }
 
@@ -356,7 +446,7 @@ function toonGeschiedenis() {
     const tijdLabel = TIJDEN.find(t => t.id === item.tijd).label;
     const regel = document.createElement("div");
     regel.className = `geschiedenis-regel geschiedenis-${item.status}`;
-    const antwoordTekst = item.antwoord || "—";
+    const antwoordTekst = item.status === "overgeslagen" ? "(passé)" : item.antwoord || "—";
     regel.textContent = `${item.werkwoord} (${VOORNAAMWOORDEN[item.persoonIndex]}, ${tijdLabel}) — ${antwoordTekst}`;
     lijst.appendChild(regel);
   });
@@ -370,11 +460,11 @@ function bijwerkenScoreWeergave() {
 document.getElementById("controleerKnop").addEventListener("click", controleerAntwoord);
 document.getElementById("volgendeKnop").addEventListener("click", nieuweVraag);
 
-// Enter key submits (or moves to next question if already correct)
+// Enter key submits; once the answer is correct, Enter moves to the next question too.
 document.getElementById("antwoordVeld").addEventListener("keydown", e => {
   if (e.key !== "Enter") return;
-  const volgendeZichtbaar = document.getElementById("volgendeKnop").style.display !== "none";
-  volgendeZichtbaar ? nieuweVraag() : controleerAntwoord();
+  const alGoedBeantwoord = document.getElementById("volgendeKnop").style.display !== "none";
+  alGoedBeantwoord ? nieuweVraag() : controleerAntwoord();
 });
 
 laadWerkwoordSelectie();
