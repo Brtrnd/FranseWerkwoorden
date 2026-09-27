@@ -98,14 +98,21 @@ function kiesPersoonIndex(tijd) {
   return opties[Math.floor(Math.random() * opties.length)];
 }
 
+// A handful of common verbs start with an "aspirated" h, which blocks elision
+// (je hais, not j'hais). Not exhaustive — this is a curated list, not real data;
+// extend it if another aspirate-h verb comes up in your verb selection.
+const H_ASPIRE_WERKWOORDEN = new Set(["haïr", "hurler", "hisser", "honnir", "houspiller", "heurter", "hâter"]);
+
 // Central lookup for "what is the correct answer here", including the computed
 // futur proche and gaps in the data (e.g. no imperative for "pouvoir") -> null.
 function juisteAntwoordVoor(werkwoord, tijd, persoonIndex) {
   if (tijd === "futur-proche") {
     return `${FUTUR_PROCHE_HULPWERKWOORD[persoonIndex]} ${werkwoord}`;
   }
-  const rij = WERKWOORDEN[werkwoord][tijd];
-  return rij ? rij[persoonIndex] : null;
+  const ingang = WERKWOORDEN[werkwoord];
+  if (!ingang) return null; // unknown verb — shouldn't happen via the UI, but stay safe
+  const rij = ingang[tijd];
+  return rij ? (rij[persoonIndex] ?? null) : null;
 }
 
 // Selection screen shows both languages when known ("manger — eten"); French alone if not translated.
@@ -284,6 +291,24 @@ function nieuweVraag() {
     antwoord = juisteAntwoordVoor(werkwoord, tijd, persoonIndex);
     pogingen++;
   } while (antwoord === null && pogingen < 50);
+
+  if (antwoord === null) {
+    // Genuinely no answerable combo in the current selection (e.g. only "pouvoir" + only impératif).
+    huidigeVraag = null;
+    document.getElementById("vraagWerkwoord").textContent = "";
+    document.getElementById("vraagPersoon").textContent = "";
+    document.getElementById("vraagTijd").textContent = "";
+    document.getElementById("antwoordVeld").value = "";
+    document.getElementById("antwoordVeld").disabled = true;
+    document.getElementById("feedback").textContent = "Aucune question possible avec cette sélection — ajoute un verbe ou un temps.";
+    document.getElementById("feedback").className = "feedback fout";
+    document.getElementById("controleerKnop").disabled = true;
+    document.getElementById("hulpKnop").style.display = "none";
+    document.getElementById("overslaanKnop").style.display = "none";
+    document.getElementById("volledigeHulp").style.display = "none";
+    return;
+  }
+  document.getElementById("volledigeHulp").style.display = "inline-block";
   huidigeVraag = { werkwoord, tijd, persoonIndex };
 
   const tijdLabel = TIJDEN.find(t => t.id === tijd).label;
@@ -320,18 +345,19 @@ function normaliseerAntwoord(tekst) {
 }
 
 // Accepts the answer with or without the subject pronoun prefixed ("mange" and "il mange"
-// both count), using the correct elided form ("j'") for je before a vowel/h/y sound.
-function pronomenVarianten(persoonIndex, antwoord) {
+// both count), using the correct elided form ("j'") for je before a vowel/h muet sound.
+function pronomenVarianten(persoonIndex, antwoord, werkwoord) {
   const pronoun = VOORNAAMWOORDEN[persoonIndex];
   if (pronoun === "je") {
-    const beginKlinkerOfH = /^[aeiouhyàâäéèêëîïôöùûü]/i.test(antwoord);
+    const aspireerd = H_ASPIRE_WERKWOORDEN.has(werkwoord);
+    const beginKlinkerOfH = !aspireerd && /^[aeiouhyàâäéèêëîïôöùûü]/i.test(antwoord);
     return [beginKlinkerOfH ? `j'${antwoord}` : `je ${antwoord}`];
   }
   return [`${pronoun} ${antwoord}`];
 }
 
-function isAntwoordJuist(getypt, juisteAntwoord, persoonIndex) {
-  const varianten = [juisteAntwoord, ...pronomenVarianten(persoonIndex, juisteAntwoord)];
+function isAntwoordJuist(getypt, juisteAntwoord, persoonIndex, werkwoord) {
+  const varianten = [juisteAntwoord, ...pronomenVarianten(persoonIndex, juisteAntwoord, werkwoord)];
   const genormaliseerd = normaliseerAntwoord(getypt);
   return varianten.some(v => normaliseerAntwoord(v) === genormaliseerd);
 }
@@ -342,6 +368,7 @@ function toonHulp() {
   hulpActief = true;
   const veld = document.getElementById("antwoordVeld");
   const juisteAntwoord = juisteAntwoordVoor(huidigeVraag.werkwoord, huidigeVraag.tijd, huidigeVraag.persoonIndex);
+  if (juisteAntwoord === null) return; // shouldn't happen (nieuweVraag filters these out), but stay safe
   const getypt = veld.value;
 
   const weergave = document.getElementById("hulpWeergave");
@@ -358,7 +385,7 @@ function toonHulp() {
 document.getElementById("hulpKnop").addEventListener("click", toonHulp);
 // Keep the hint in sync while typing, once it's been requested for this question.
 document.getElementById("antwoordVeld").addEventListener("input", () => {
-  if (hulpActief) toonHulp();
+  if (hulpActief && huidigeVraag) toonHulp();
   document.getElementById("controleerKnop").disabled = document.getElementById("antwoordVeld").value.trim() === "";
 });
 
@@ -369,7 +396,7 @@ function bouwConjugatieTabel(werkwoord) {
     html += `<tr><th>${t.label}</th>`;
     for (let i = 0; i < VOORNAAMWOORDEN.length; i++) {
       const vorm = juisteAntwoordVoor(werkwoord, t.id, i);
-      html += `<td>${vorm || "—"}</td>`;
+      html += vorm ? `<td>${vorm}</td>` : `<td class="tabel-nvt">—</td>`;
     }
     html += "</tr>";
   });
@@ -382,11 +409,12 @@ document.getElementById("volledigeHulpKnop").addEventListener("click", () => {
 });
 
 function controleerAntwoord() {
+  if (!huidigeVraag) return;
   const veld = document.getElementById("antwoordVeld");
   if (veld.value.trim() === "") return; // guard: nothing to check
 
   const juisteAntwoord = juisteAntwoordVoor(huidigeVraag.werkwoord, huidigeVraag.tijd, huidigeVraag.persoonIndex);
-  const isJuist = isAntwoordJuist(veld.value, juisteAntwoord, huidigeVraag.persoonIndex);
+  const isJuist = isAntwoordJuist(veld.value, juisteAntwoord, huidigeVraag.persoonIndex, huidigeVraag.werkwoord);
 
   const feedback = document.getElementById("feedback");
 
@@ -418,6 +446,7 @@ function controleerAntwoord() {
 }
 
 document.getElementById("overslaanKnop").addEventListener("click", () => {
+  if (!huidigeVraag) return;
   voegGeschiedenisToe({
     werkwoord: huidigeVraag.werkwoord,
     tijd: huidigeVraag.tijd,
@@ -462,7 +491,7 @@ document.getElementById("volgendeKnop").addEventListener("click", nieuweVraag);
 
 // Enter key submits; once the answer is correct, Enter moves to the next question too.
 document.getElementById("antwoordVeld").addEventListener("keydown", e => {
-  if (e.key !== "Enter") return;
+  if (e.key !== "Enter" || !huidigeVraag) return;
   const alGoedBeantwoord = document.getElementById("volgendeKnop").style.display !== "none";
   alGoedBeantwoord ? nieuweVraag() : controleerAntwoord();
 });

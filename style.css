@@ -150,7 +150,9 @@ fieldset {
 .volledige-hulp.actief .conjugatie-tabel {
   display: block;
 }
-
+.hulp-fout{
+	color:red;	
+}
 .conjugatie-tabel table {
   border-collapse: collapse;
   font-size: 0.85rem;
@@ -166,6 +168,11 @@ fieldset {
 
 .conjugatie-tabel thead th {
   background: #f7fafc;
+}
+
+.tabel-nvt {
+  color: #bbb;
+  font-style: italic;
 }
 
 .checkbox-lijst label {

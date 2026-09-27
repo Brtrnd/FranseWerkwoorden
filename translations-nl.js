@@ -10,5 +10,10 @@ const VERTALINGEN = {
   faire: "doen / maken",
   partir: "vertrekken",
   prendre: "nemen",
-  pouvoir: "kunnen"
+  pouvoir: "kunnen",
+  jouer: "spelen",
+  venir: "komen",
+  dormir: "slapen",
+  étudier: "studeren",
+  attendre: "wachten"
 };
